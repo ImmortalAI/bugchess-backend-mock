@@ -8,6 +8,7 @@ import {
 } from "./db";
 import { WsEvent, wsMsg } from "./ws-events";
 import { spec } from "./openapi";
+import { msg } from "./i18n";
 
 const PORT = 3000;
 
@@ -28,10 +29,10 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function notFound():              Response { return json({ error: "Not found" }, 404); }
-function badRequest(msg: string): Response { return json({ error: msg }, 400); }
-function unauthorized():          Response { return json({ error: "Unauthorized" }, 401); }
-function conflict(msg: string):   Response { return json({ error: msg }, 409); }
+function notFound():               Response { return json({ error: msg.notFound }, 404); }
+function badRequest(text: string): Response { return json({ error: text }, 400); }
+function unauthorized():           Response { return json({ error: msg.unauthorized }, 401); }
+function conflict(text: string):   Response { return json({ error: text }, 409); }
 
 function resolveUserId(req: Request): string | null {
   const auth = req.headers.get("Authorization");
@@ -48,11 +49,11 @@ async function handleAuth(method: string, pathname: string, req: Request): Promi
     case "login": {
       if (method !== "POST") return notFound();
       const body = (await req.json().catch(() => null)) as Record<string, string> | null;
-      if (!body?.email || !body?.password) return badRequest("email and password required");
+      if (!body?.email || !body?.password) return badRequest(msg.loginFieldsRequired);
 
       const user = findUserByEmail(body.email);
       if (!user || !(await verifyPassword(body.password, user.password_hash))) {
-        return json({ error: "Invalid credentials" }, 401);
+        return json({ error: msg.invalidCredentials }, 401);
       }
       return json({ access_token: user.id, refresh_token: `refresh_${user.id}` });
     }
@@ -61,36 +62,36 @@ async function handleAuth(method: string, pathname: string, req: Request): Promi
       if (method !== "POST") return notFound();
       const body = (await req.json().catch(() => null)) as Record<string, string> | null;
       if (!body?.email || !body?.nickname || !body?.password || !body?.confirm_password) {
-        return badRequest("email, nickname, password and confirm_password required");
+        return badRequest(msg.registerFieldsRequired);
       }
-      if (body.password !== body.confirm_password) return badRequest("Passwords do not match");
+      if (body.password !== body.confirm_password) return badRequest(msg.passwordMismatch);
 
       try {
         await createUser(body.email, body.nickname, body.password);
       } catch {
-        return conflict("Email or nickname already taken");
+        return conflict(msg.credentialsTaken);
       }
-      return json({ message: "Registered successfully" }, 201);
+      return json({ message: msg.registeredOk }, 201);
     }
 
     case "logout": {
       if (method !== "POST") return notFound();
-      return json({ message: "Logged out" });
+      return json({ message: msg.loggedOut });
     }
 
     case "logout_all": {
       if (method !== "POST") return notFound();
-      return json({ message: "Logged out from all devices" });
+      return json({ message: msg.loggedOutAll });
     }
 
     case "refresh": {
       if (method !== "POST") return notFound();
       const body = (await req.json().catch(() => null)) as Record<string, string> | null;
-      if (!body?.refresh_token) return badRequest("refresh_token required");
+      if (!body?.refresh_token) return badRequest(msg.refreshTokenRequired);
 
       const userId = body.refresh_token.replace(/^refresh_/, "");
       const user = findUserById(userId);
-      if (!user) return json({ error: "Invalid refresh token" }, 401);
+      if (!user) return json({ error: msg.invalidRefreshToken }, 401);
 
       return json({ access_token: user.id, refresh_token: `refresh_${user.id}` });
     }
@@ -149,7 +150,7 @@ function onWsOpen(ws: ServerWebSocket<WsData>): void {
   const { userId } = ws.data;
 
   if (!userId) {
-    ws.send(wsMsg(WsEvent.ERROR, { message: "Unauthorized" }));
+    ws.send(wsMsg(WsEvent.ERROR, { message: msg.unauthorized }));
     ws.close();
     return;
   }
@@ -181,15 +182,15 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
   const { userId } = ws.data;
   if (!userId) return;
 
-  let msg: { type: WsEvent; data?: Record<string, unknown> };
+  let parsed: { type: WsEvent; data?: Record<string, unknown> };
   try {
-    msg = JSON.parse(raw.toString());
+    parsed = JSON.parse(raw.toString());
   } catch {
-    ws.send(wsMsg(WsEvent.ERROR, { message: "Invalid JSON" }));
+    ws.send(wsMsg(WsEvent.ERROR, { message: msg.wsInvalidJson }));
     return;
   }
 
-  const { type, data: d } = msg;
+  const { type, data: d } = parsed;
 
   const err = (message: string) => ws.send(wsMsg(WsEvent.ERROR, { message }));
 
@@ -203,7 +204,7 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
 
     // ── Idle actions ─────────────────────────────────────────
     case WsEvent.CREATE_LOBBY: {
-      if (getUserState(userId) !== "idle") { err("Already in lobby or game"); break; }
+      if (getUserState(userId) !== "idle") { err(msg.wsNotIdle); break; }
 
       const timeMinutes     = Number(d?.time_minutes ?? 5);
       const timeIncrSeconds = Number(d?.time_increment_seconds ?? 0);
@@ -214,14 +215,14 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
     }
 
     case WsEvent.INVITE_ACCEPT: {
-      if (getUserState(userId) !== "idle") { err("Not in idle state"); break; }
+      if (getUserState(userId) !== "idle") { err(msg.wsNotInIdleState); break; }
 
       const invite = pendingInvites.get(userId);
-      if (!invite) { err("No pending invite"); break; }
+      if (!invite) { err(msg.wsNoPendingInvite); break; }
       pendingInvites.delete(userId);
 
       const lobby = joinLobby(invite.lobbyId, userId);
-      if (!lobby) { err("Lobby is full or no longer exists"); break; }
+      if (!lobby) { err(msg.wsLobbyFullOrGone); break; }
 
       // Новому игроку — его вид лобби
       ws.send(wsMsg(WsEvent.CONNECT_LOBBY, lobby));
@@ -238,8 +239,8 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
     // ── Lobby actions ─────────────────────────────────────────
     case WsEvent.LOBBY_TIME: {
       const lobby = getLobbyForUser(userId);
-      if (!lobby)           { err("Not in lobby"); break; }
-      if (!lobby.can_modify){ err("Only lobby creator can do this"); break; }
+      if (!lobby)           { err(msg.wsNotInLobby); break; }
+      if (!lobby.can_modify){ err(msg.wsNotCreator); break; }
 
       const timeMinutes     = Number(d?.time_minutes     ?? lobby.time_minutes);
       const timeIncrSeconds = Number(d?.time_increment_seconds ?? lobby.time_increment_seconds);
@@ -250,8 +251,8 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
 
     case WsEvent.LOBBY_RANKED: {
       const lobby = getLobbyForUser(userId);
-      if (!lobby)           { err("Not in lobby"); break; }
-      if (!lobby.can_modify){ err("Only lobby creator can do this"); break; }
+      if (!lobby)           { err(msg.wsNotInLobby); break; }
+      if (!lobby.can_modify){ err(msg.wsNotCreator); break; }
 
       updateLobbyRanked(lobby.lobby_id, Boolean(d?.is_rated));
       broadcastLobby(lobby.lobby_id);
@@ -260,14 +261,14 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
 
     case WsEvent.LOBBY_INVITE: {
       const lobby = getLobbyForUser(userId);
-      if (!lobby)           { err("Not in lobby"); break; }
-      if (!lobby.can_modify){ err("Only lobby creator can do this"); break; }
+      if (!lobby)           { err(msg.wsNotInLobby); break; }
+      if (!lobby.can_modify){ err(msg.wsNotCreator); break; }
 
       const nickname = String(d?.nickname ?? "");
       const target   = findUserByNickname(nickname);
-      if (!target)                              { err("User not found"); break; }
-      if (target.id === userId)                 { err("Cannot invite yourself"); break; }
-      if (getUserState(target.id) !== "idle")   { err("User is not available"); break; }
+      if (!target)                              { err(msg.wsUserNotFound); break; }
+      if (target.id === userId)                 { err(msg.wsSelfInvite); break; }
+      if (getUserState(target.id) !== "idle")   { err(msg.wsUserUnavailable); break; }
 
       const sender = findUserById(userId)!;
       pendingInvites.set(target.id, { lobbyId: lobby.lobby_id, fromNickname: sender.nickname });
@@ -277,8 +278,8 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
 
     case WsEvent.START_MM: {
       const lobby = getLobbyForUser(userId);
-      if (!lobby)           { err("Not in lobby"); break; }
-      if (!lobby.can_modify){ err("Only lobby creator can do this"); break; }
+      if (!lobby)           { err(msg.wsNotInLobby); break; }
+      if (!lobby.can_modify){ err(msg.wsNotCreator); break; }
 
       const { playerIds } = createGame(lobby.lobby_id);
 
@@ -290,7 +291,7 @@ function onWsMessage(ws: ServerWebSocket<WsData>, raw: string | Buffer): void {
     }
 
     default:
-      err(`Unknown event type: ${type}`);
+      err(msg.wsUnknownEvent(type));
   }
 }
 
@@ -308,7 +309,7 @@ Bun.serve<WsData>({
       const token  = url.searchParams.get("token");
       const userId = token ? findUserById(token)?.id ?? null : null;
       const upgraded = server.upgrade(req, { data: { userId } });
-      return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 });
+      return upgraded ? undefined : new Response(msg.wsUpgradeFailed, { status: 400 });
     }
 
     if (pathname === "/openapi.json") {
